@@ -8,28 +8,87 @@ import streamlit as st
 
 st.set_page_config(page_title="Forecasting", layout="wide")
 
+FINAL_CLUSTERS = list(range(8))
+
 
 @st.cache_data
 def load_csv(path: str) -> pd.DataFrame:
-    p = Path(path)
-    if not p.exists():
+    file_path = Path(path)
+    if not file_path.exists():
         return pd.DataFrame()
-    return pd.read_csv(p)
+    return pd.read_csv(file_path)
+
+
+def clean_cluster_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "cluster_id" not in df.columns:
+        return df.copy()
+
+    cleaned = df.copy()
+    cleaned["cluster_id"] = pd.to_numeric(cleaned["cluster_id"], errors="coerce")
+    cleaned = cleaned.dropna(subset=["cluster_id"])
+    cleaned["cluster_id"] = cleaned["cluster_id"].astype(int)
+    cleaned = cleaned[cleaned["cluster_id"].isin(FINAL_CLUSTERS)].copy()
+    return cleaned
+
+
+def load_label_map(labels_df: pd.DataFrame) -> dict[int, str]:
+    if labels_df.empty or not {"cluster_id", "label"}.issubset(labels_df.columns):
+        return {}
+
+    labels = clean_cluster_df(labels_df)
+    labels = labels.dropna(subset=["label"]).copy()
+    labels["label"] = labels["label"].astype(str)
+
+    return dict(zip(labels["cluster_id"], labels["label"]))
 
 
 forecasts_df = load_csv("data/processed/trends/cluster_forecasts.csv")
 backtest_df = load_csv("data/processed/trends/forecast_backtest_metrics.csv")
+labels_df = load_csv("data/processed/trends/cluster_labels.csv")
+
+forecasts_df = clean_cluster_df(forecasts_df)
+backtest_df = clean_cluster_df(backtest_df)
+labels_df = clean_cluster_df(labels_df)
+
+label_map = load_label_map(labels_df)
+
+if not forecasts_df.empty:
+    if "forecast_month" in forecasts_df.columns:
+        forecasts_df["forecast_month"] = pd.to_datetime(
+            forecasts_df["forecast_month"], errors="coerce"
+        )
+
+    if "label" not in forecasts_df.columns:
+        forecasts_df["label"] = forecasts_df["cluster_id"].map(label_map)
+    else:
+        forecasts_df["label"] = forecasts_df["cluster_id"].map(label_map).fillna(
+            forecasts_df["label"]
+        )
+
+    if "forecast_month" in forecasts_df.columns:
+        forecasts_df = forecasts_df.sort_values(["cluster_id", "forecast_month"])
+
+if not backtest_df.empty:
+    if "label" not in backtest_df.columns:
+        backtest_df["label"] = backtest_df["cluster_id"].map(label_map)
+    else:
+        backtest_df["label"] = backtest_df["cluster_id"].map(label_map).fillna(
+            backtest_df["label"]
+        )
+
+    backtest_df = backtest_df.sort_values("cluster_id")
+
 
 st.title("Forecasting")
 st.markdown(
     """
-This page presents the short-term forecast outputs for each cluster and the backtest results used to evaluate forecast quality.
+This page presents the short-term forecast outputs for the final eight clusters and the backtest results used to assess forecast quality.
 
 The current approach compares:
 - a **linear trend forecast**, which projects recent movement forward, and
 - a **naive persistence baseline**, which assumes the next value will be the same as the most recent observed value.
 
-This makes the forecasting results more interpretable, as forecast errors are no longer shown in isolation.
+This makes the forecast results easier to interpret, because model performance is judged against a simple baseline rather than in isolation.
 """
 )
 
@@ -63,7 +122,7 @@ if not forecasts_df.empty:
         "slope",
         "intercept",
     ]
-    forecast_cols = [c for c in forecast_cols if c in display_forecasts.columns]
+    forecast_cols = [col for col in forecast_cols if col in display_forecasts.columns]
 
     st.dataframe(
         display_forecasts[forecast_cols],
@@ -71,7 +130,7 @@ if not forecasts_df.empty:
         hide_index=True,
     )
 else:
-    st.warning("Forecast file not found.")
+    st.warning("Forecast file not found, or no rows matched the final K=8 solution.")
 
 st.markdown("## Forecast Backtest")
 st.caption(
@@ -94,10 +153,10 @@ st.caption(
 if not backtest_df.empty:
     display_backtest = backtest_df.copy()
 
-    # Summary metrics
     st.markdown("### Backtest Summary")
 
-    total_clusters = len(display_backtest)
+    total_clusters = display_backtest["cluster_id"].nunique()
+
     linear_wins = (
         (display_backtest["better_model"] == "linear").sum()
         if "better_model" in display_backtest.columns
@@ -125,12 +184,12 @@ if not backtest_df.empty:
         else None
     )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Clusters tested", total_clusters)
-    c2.metric("Linear wins", linear_wins)
-    c3.metric("Naive wins", naive_wins)
-    c4.metric("Ties", ties)
-    c5.metric(
+    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+    metric_1.metric("Clusters tested", total_clusters)
+    metric_2.metric("Linear wins", linear_wins)
+    metric_3.metric("Naive wins", naive_wins)
+    metric_4.metric("Ties", ties)
+    metric_5.metric(
         "Avg MAE improvement",
         (
             round(mean_mae_naive - mean_mae_linear, 4)
@@ -154,7 +213,7 @@ if not backtest_df.empty:
         "better_model",
         "mae_improvement_vs_naive",
     ]
-    backtest_cols = [c for c in backtest_cols if c in display_backtest.columns]
+    backtest_cols = [col for col in backtest_cols if col in display_backtest.columns]
 
     st.dataframe(
         display_backtest[backtest_cols],
@@ -164,21 +223,24 @@ if not backtest_df.empty:
 
     if "better_model" in display_backtest.columns:
         st.markdown("### Clusters where the linear model beat the naive baseline")
-        linear_better = display_backtest[display_backtest["better_model"] == "linear"]
+
+        linear_better = display_backtest[
+            display_backtest["better_model"] == "linear"
+        ].copy()
 
         if not linear_better.empty:
             st.dataframe(
                 linear_better[
                     [
-                        c
-                        for c in [
+                        col
+                        for col in [
                             "cluster_id",
                             "label",
                             "mae_linear",
                             "mae_naive",
                             "mae_improvement_vs_naive",
                         ]
-                        if c in linear_better.columns
+                        if col in linear_better.columns
                     ]
                 ],
                 use_container_width=True,
@@ -187,7 +249,7 @@ if not backtest_df.empty:
         else:
             st.info("The linear model did not outperform the naive baseline on any cluster.")
 else:
-    st.warning("Backtest metrics file not found.")
+    st.warning("Backtest metrics file not found, or no rows matched the final K=8 solution.")
 
 with st.expander("How to interpret these results"):
     st.markdown(
@@ -197,6 +259,11 @@ The forecast table gives a short-term estimate of where each cluster may move ne
 The backtest table evaluates the forecasting logic on a final holdout point by comparing:
 - a **linear trend model**, and
 - a **naive persistence baseline**.
+
+This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.  
+Given the short and noisy time series, the main purpose is to test whether the linear model adds value beyond a simple baseline.
+"""
+    )
 
 This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.  
 Given the short and noisy time series, the main purpose is to assess whether the linear model adds value beyond a simple baseline.
