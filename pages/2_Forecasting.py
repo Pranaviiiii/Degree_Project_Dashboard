@@ -31,7 +31,7 @@ def clean_cluster_df(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
-def load_label_map(labels_df: pd.DataFrame) -> dict[int, str]:
+def load_label_map(labels_df: pd.DataFrame) -> dict:
     if labels_df.empty or not {"cluster_id", "label"}.issubset(labels_df.columns):
         return {}
 
@@ -191,11 +191,9 @@ if not backtest_df.empty:
     metric_4.metric("Ties", ties)
     metric_5.metric(
         "Avg MAE improvement",
-        (
-            round(mean_mae_naive - mean_mae_linear, 4)
-            if mean_mae_linear is not None and mean_mae_naive is not None
-            else "N/A"
-        ),
+        round(mean_mae_naive - mean_mae_linear, 4)
+        if mean_mae_linear is not None and mean_mae_naive is not None
+        else "N/A",
     )
 
     st.markdown("### Detailed Backtest Results")
@@ -229,20 +227,17 @@ if not backtest_df.empty:
         ].copy()
 
         if not linear_better.empty:
+            better_cols = [
+                "cluster_id",
+                "label",
+                "mae_linear",
+                "mae_naive",
+                "mae_improvement_vs_naive",
+            ]
+            better_cols = [col for col in better_cols if col in linear_better.columns]
+
             st.dataframe(
-                linear_better[
-                    [
-                        col
-                        for col in [
-                            "cluster_id",
-                            "label",
-                            "mae_linear",
-                            "mae_naive",
-                            "mae_improvement_vs_naive",
-                        ]
-                        if col in linear_better.columns
-                    ]
-                ],
+                linear_better[better_cols],
                 use_container_width=True,
                 hide_index=True,
             )
@@ -260,12 +255,7 @@ The backtest table evaluates the forecasting logic on a final holdout point by c
 - a **linear trend model**, and
 - a **naive persistence baseline**.
 
-This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.  
+This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.
 Given the short and noisy time series, the main purpose is to test whether the linear model adds value beyond a simple baseline.
-"""
-    )
-
-This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.  
-Given the short and noisy time series, the main purpose is to assess whether the linear model adds value beyond a simple baseline.
 """
     )
