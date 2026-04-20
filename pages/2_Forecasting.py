@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -31,7 +32,7 @@ def clean_cluster_df(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
-def load_label_map(labels_df: pd.DataFrame) -> dict:
+def load_label_map(labels_df: pd.DataFrame) -> dict[int, str]:
     if labels_df.empty or not {"cluster_id", "label"}.issubset(labels_df.columns):
         return {}
 
@@ -40,6 +41,10 @@ def load_label_map(labels_df: pd.DataFrame) -> dict:
     labels["label"] = labels["label"].astype(str)
 
     return dict(zip(labels["cluster_id"], labels["label"]))
+
+
+def format_cluster_name(cluster_id: int, label_map: dict[int, str]) -> str:
+    return label_map.get(cluster_id, f"Cluster {cluster_id}")
 
 
 forecasts_df = load_csv("data/processed/trends/cluster_forecasts.csv")
@@ -79,38 +84,247 @@ if not backtest_df.empty:
     backtest_df = backtest_df.sort_values("cluster_id")
 
 
-st.title("Forecasting")
 st.markdown(
     """
-This page presents the short-term forecast outputs for the final eight clusters and the backtest results used to assess forecast quality.
+    <style>
+    .hero-box {
+        padding: 1.6rem 1.6rem;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #334155 100%);
+        color: white;
+        margin-bottom: 1.2rem;
+    }
 
-The current approach compares:
-- a **linear trend forecast**, which projects recent movement forward, and
-- a **naive persistence baseline**, which assumes the next value will be the same as the most recent observed value.
+    .hero-box h1 {
+        margin: 0 0 0.35rem 0;
+        font-size: 2.2rem;
+    }
 
-This makes the forecast results easier to interpret, because model performance is judged against a simple baseline rather than in isolation.
-"""
+    .hero-box p {
+        margin: 0;
+        font-size: 1rem;
+        line-height: 1.6;
+        color: #dbeafe;
+        max-width: 1000px;
+    }
+
+    .mini-card {
+        background: #ffffff;
+        padding: 1rem 1rem;
+        border-radius: 16px;
+        border: 1px solid #e2e8f0;
+        min-height: 120px;
+        color: #0f172a;  
+    }
+
+    .mini-card h4 {
+        color: #0f172a;
+        margin-bottom: 0.3rem;
+    }
+
+    .mini-card p {
+        color: #334155;
+        font-size: 0.9rem;
+    }
+
+    .small-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.35rem;
+    }
+
+    .section-note {
+        color: #475569;
+        font-size: 0.95rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
+
+st.markdown(
+    """
+    <div class="hero-box">
+        <h1>Forecasting</h1>
+        <p>
+            This page presents short-term forecast outputs for the final eight clusters and the backtest results used to assess forecast quality.
+            The comparison is between a linear trend model and a naive persistence baseline, making it easier to judge whether the model adds value.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if forecasts_df.empty and backtest_df.empty:
+    st.warning("Forecast and backtest files were not found, or no rows matched the final K=8 solution.")
+    st.stop()
+
+available_clusters = sorted(
+    set(forecasts_df["cluster_id"].tolist() if not forecasts_df.empty else [])
+    | set(backtest_df["cluster_id"].tolist() if not backtest_df.empty else [])
+)
+
+filter_col_1, filter_col_2 = st.columns([2, 1])
+
+with filter_col_1:
+    selected_cluster = st.selectbox(
+        "Select a cluster to inspect",
+        options=["All clusters"] + available_clusters,
+        format_func=lambda x: x if x == "All clusters" else f"{x}: {format_cluster_name(x, label_map)}",
+    )
+
+with filter_col_2:
+    st.markdown(
+        """
+        <div class="section-note" style="padding-top: 1.9rem;">
+            Use the filter to switch from an overall view to a single-cluster demonstration.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+display_forecasts = forecasts_df.copy()
+display_backtest = backtest_df.copy()
+
+if selected_cluster != "All clusters":
+    display_forecasts = display_forecasts[display_forecasts["cluster_id"] == selected_cluster].copy()
+    display_backtest = display_backtest[display_backtest["cluster_id"] == selected_cluster].copy()
+
+total_clusters = (
+    backtest_df["cluster_id"].nunique()
+    if not backtest_df.empty
+    else forecasts_df["cluster_id"].nunique()
+)
+
+linear_wins = (
+    (backtest_df["better_model"] == "linear").sum()
+    if not backtest_df.empty and "better_model" in backtest_df.columns
+    else 0
+)
+naive_wins = (
+    (backtest_df["better_model"] == "naive").sum()
+    if not backtest_df.empty and "better_model" in backtest_df.columns
+    else 0
+)
+ties = (
+    (backtest_df["better_model"] == "tie").sum()
+    if not backtest_df.empty and "better_model" in backtest_df.columns
+    else 0
+)
+
+mean_mae_linear = (
+    backtest_df["mae_linear"].mean()
+    if not backtest_df.empty and "mae_linear" in backtest_df.columns
+    else None
+)
+mean_mae_naive = (
+    backtest_df["mae_naive"].mean()
+    if not backtest_df.empty and "mae_naive" in backtest_df.columns
+    else None
+)
+
+summary_1, summary_2, summary_3, summary_4, summary_5 = st.columns(5)
+summary_1.metric("Final clusters", total_clusters)
+summary_2.metric("Linear wins", linear_wins)
+summary_3.metric("Naive wins", naive_wins)
+summary_4.metric("Ties", ties)
+summary_5.metric(
+    "Avg MAE improvement",
+    round(mean_mae_naive - mean_mae_linear, 4)
+    if mean_mae_linear is not None and mean_mae_naive is not None
+    else "N/A",
+)
+
+st.markdown("## Model Comparison")
+
+comparison_col_1, comparison_col_2, comparison_col_3 = st.columns(3)
+
+with comparison_col_1:
+    st.markdown(
+        """
+        <div class="mini-card">
+            <div class="small-label">Linear trend model</div>
+            <h4>Projects recent movement</h4>
+            <p>Uses the recent direction of cluster share to estimate the next short-term values.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with comparison_col_2:
+    st.markdown(
+        """
+        <div class="mini-card">
+            <div class="small-label">Naive baseline</div>
+            <h4>Assumes persistence</h4>
+            <p>Uses the most recent observed value as the next prediction, giving a simple benchmark.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with comparison_col_3:
+    st.markdown(
+        """
+        <div class="mini-card">
+            <div class="small-label">Interpretation</div>
+            <h4>Relative performance matters</h4>
+            <p>The key question is whether the linear model improves on a simple and defensible baseline.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+if not display_forecasts.empty and selected_cluster != "All clusters":
+    st.markdown("## Forecast Trajectory")
+
+    chart_df = display_forecasts.copy()
+
+    if "forecast_month" in chart_df.columns and (
+        "predicted_share_pct" in chart_df.columns or "predicted_share_pct_naive" in chart_df.columns
+    ):
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+
+        if "predicted_share_pct" in chart_df.columns:
+            ax.plot(
+                chart_df["forecast_month"],
+                chart_df["predicted_share_pct"],
+                marker="o",
+                linewidth=2,
+                label="Linear forecast",
+            )
+
+        if "predicted_share_pct_naive" in chart_df.columns:
+            ax.plot(
+                chart_df["forecast_month"],
+                chart_df["predicted_share_pct_naive"],
+                marker="o",
+                linestyle="--",
+                linewidth=2,
+                label="Naive baseline",
+            )
+
+        ax.set_title(format_cluster_name(selected_cluster, label_map))
+        ax.set_xlabel("Forecast month")
+        ax.set_ylabel("Predicted share (%)")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        st.pyplot(fig)
+    else:
+        st.info("No chartable forecast columns were available for the selected cluster.")
 
 st.markdown("## Forecast Table")
 st.caption(
     """
-**Column guide**
-- **cluster_id**: numeric cluster identifier  
-- **label**: human-readable cluster name  
-- **forecast_month**: month being predicted  
-- **forecast_step**: how many steps ahead the prediction is  
-- **predicted_share_pct**: forecast from the linear trend model  
-- **predicted_share_pct_naive**: forecast from the naive persistence baseline  
-- **last_observed_share_pct**: most recent observed cluster share used as the baseline reference  
-- **slope**: trend direction and rate of change in the linear model  
-- **intercept**: starting point of the linear model
+This table shows the forecast outputs for the selected view.
 """
 )
 
-if not forecasts_df.empty:
-    display_forecasts = forecasts_df.copy()
-
+if not display_forecasts.empty:
     forecast_cols = [
         "cluster_id",
         "label",
@@ -130,74 +344,16 @@ if not forecasts_df.empty:
         hide_index=True,
     )
 else:
-    st.warning("Forecast file not found, or no rows matched the final K=8 solution.")
+    st.info("No forecast rows are available for the selected view.")
 
-st.markdown("## Forecast Backtest")
+st.markdown("## Backtest Results")
 st.caption(
     """
-**Column guide**
-- **cluster_id**: numeric cluster identifier  
-- **label**: cluster name  
-- **actual_last_share_pct**: observed final share value  
-- **predicted_last_share_pct_linear**: backtest prediction from the linear trend model  
-- **predicted_last_share_pct_naive**: backtest prediction from the naive baseline  
-- **mae_linear**: absolute error of the linear model, lower is better  
-- **mae_naive**: absolute error of the naive baseline, lower is better  
-- **mape_pct_linear**: percentage error of the linear model  
-- **mape_pct_naive**: percentage error of the naive baseline  
-- **better_model**: which model performed better on the final holdout point  
-- **mae_improvement_vs_naive**: positive values mean the linear model improved on the naive baseline
+These results compare the linear model against the naive baseline on the final holdout point.
 """
 )
 
-if not backtest_df.empty:
-    display_backtest = backtest_df.copy()
-
-    st.markdown("### Backtest Summary")
-
-    total_clusters = display_backtest["cluster_id"].nunique()
-
-    linear_wins = (
-        (display_backtest["better_model"] == "linear").sum()
-        if "better_model" in display_backtest.columns
-        else 0
-    )
-    naive_wins = (
-        (display_backtest["better_model"] == "naive").sum()
-        if "better_model" in display_backtest.columns
-        else 0
-    )
-    ties = (
-        (display_backtest["better_model"] == "tie").sum()
-        if "better_model" in display_backtest.columns
-        else 0
-    )
-
-    mean_mae_linear = (
-        display_backtest["mae_linear"].mean()
-        if "mae_linear" in display_backtest.columns
-        else None
-    )
-    mean_mae_naive = (
-        display_backtest["mae_naive"].mean()
-        if "mae_naive" in display_backtest.columns
-        else None
-    )
-
-    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
-    metric_1.metric("Clusters tested", total_clusters)
-    metric_2.metric("Linear wins", linear_wins)
-    metric_3.metric("Naive wins", naive_wins)
-    metric_4.metric("Ties", ties)
-    metric_5.metric(
-        "Avg MAE improvement",
-        round(mean_mae_naive - mean_mae_linear, 4)
-        if mean_mae_linear is not None and mean_mae_naive is not None
-        else "N/A",
-    )
-
-    st.markdown("### Detailed Backtest Results")
-
+if not display_backtest.empty:
     backtest_cols = [
         "cluster_id",
         "label",
@@ -219,7 +375,7 @@ if not backtest_df.empty:
         hide_index=True,
     )
 
-    if "better_model" in display_backtest.columns:
+    if "better_model" in display_backtest.columns and selected_cluster == "All clusters":
         st.markdown("### Clusters where the linear model beat the naive baseline")
 
         linear_better = display_backtest[
@@ -244,7 +400,7 @@ if not backtest_df.empty:
         else:
             st.info("The linear model did not outperform the naive baseline on any cluster.")
 else:
-    st.warning("Backtest metrics file not found, or no rows matched the final K=8 solution.")
+    st.info("No backtest rows are available for the selected view.")
 
 with st.expander("How to interpret these results"):
     st.markdown(
@@ -252,8 +408,8 @@ with st.expander("How to interpret these results"):
 The forecast table gives a short-term estimate of where each cluster may move next.
 
 The backtest table evaluates the forecasting logic on a final holdout point by comparing:
-- a **linear trend model**, and
-- a **naive persistence baseline**.
+- a **linear trend model**
+- a **naive persistence baseline**
 
 This is a lightweight and exploratory evaluation rather than a production-grade forecasting framework.
 Given the short and noisy time series, the main purpose is to test whether the linear model adds value beyond a simple baseline.
