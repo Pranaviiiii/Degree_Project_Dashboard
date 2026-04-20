@@ -53,7 +53,6 @@ def load_label_map(labels_df: pd.DataFrame) -> Dict[int, str]:
     clean_labels = coerce_cluster_ids(labels_df)
     clean_labels = clean_labels.dropna(subset=["label"]).copy()
     clean_labels["label"] = clean_labels["label"].astype(str)
-
     return dict(zip(clean_labels["cluster_id"], clean_labels["label"]))
 
 
@@ -176,6 +175,18 @@ def safe_float(row: pd.Series, column: str) -> float:
     return float("nan")
 
 
+def first_existing_column(df: pd.DataFrame, candidates: List[str]) -> str | None:
+    for column in candidates:
+        if column in df.columns:
+            return column
+    return None
+
+
+def is_url(value: str) -> bool:
+    value = str(value).strip().lower()
+    return value.startswith("http://") or value.startswith("https://")
+
+
 def resolve_local_image_path(raw_path: object) -> str | None:
     if pd.isna(raw_path):
         return None
@@ -184,7 +195,7 @@ def resolve_local_image_path(raw_path: object) -> str | None:
     if not raw_value:
         return None
 
-    if raw_value.startswith("http://") or raw_value.startswith("https://"):
+    if is_url(raw_value):
         return None
 
     direct_path = Path(raw_value)
@@ -199,13 +210,33 @@ def resolve_local_image_path(raw_path: object) -> str | None:
     if data_path.exists():
         return str(data_path)
 
+    processed_path = Path("data/processed") / raw_value
+    if processed_path.exists():
+        return str(processed_path)
+
+    raw_data_path = Path("data/raw") / raw_value
+    if raw_data_path.exists():
+        return str(raw_data_path)
+
     return None
 
 
-def first_existing_column(df: pd.DataFrame, candidates: List[str]) -> str | None:
-    for column in candidates:
-        if column in df.columns:
-            return column
+def choose_pinterest_image_source(row: pd.Series, image_columns: List[str]) -> str | None:
+    for col in image_columns:
+        if col not in row.index or pd.isna(row[col]):
+            continue
+
+        raw_value = str(row[col]).strip()
+        if not raw_value:
+            continue
+
+        local_path = resolve_local_image_path(raw_value)
+        if local_path:
+            return local_path
+
+        if is_url(raw_value):
+            return raw_value
+
     return None
 
 
@@ -224,7 +255,9 @@ instagram_ex_df = coerce_cluster_ids(instagram_ex_df)
 pinterest_ex_df = coerce_cluster_ids(pinterest_ex_df)
 
 if not forecast_df.empty and "forecast_month" in forecast_df.columns:
-    forecast_df["forecast_month"] = pd.to_datetime(forecast_df["forecast_month"], errors="coerce")
+    forecast_df["forecast_month"] = pd.to_datetime(
+        forecast_df["forecast_month"], errors="coerce"
+    )
     forecast_df = forecast_df.dropna(subset=["forecast_month"]).sort_values("forecast_month")
 
 label_map = load_label_map(labels_df)
@@ -502,9 +535,12 @@ with tab_exemplars:
 
     with pinterest_col:
         st.markdown("### Pinterest Exemplars")
+        st.caption(
+            "Pinterest visuals are concentrated in a single dominant cluster due to low visual diversity in the dataset."
+        )
 
         if cluster_pinterest_ex.empty:
-            st.info("No Pinterest exemplars are available.")
+            st.info("No Pinterest exemplars are available for this cluster.")
         else:
             text_col = first_existing_column(
                 cluster_pinterest_ex,
@@ -514,25 +550,41 @@ with tab_exemplars:
                 cluster_pinterest_ex,
                 ["distance_to_centroid", "distance", "centroid_distance", "score"],
             )
-            image_col = first_existing_column(
-                cluster_pinterest_ex,
-                ["image_path", "image_url", "url", "img_url", "image"],
-            )
+            image_candidates = [
+                "local_image_path",
+                "image_path",
+                "downloaded_image_path",
+                "saved_path",
+                "filepath",
+                "file_path",
+                "image_url",
+                "url",
+                "img_url",
+                "image",
+            ]
 
             preview_df = cluster_pinterest_ex.copy()
+            preview_df["display_image"] = preview_df.apply(
+                lambda row: choose_pinterest_image_source(row, image_candidates),
+                axis=1,
+            )
 
-            if image_col:
-                preview_df["resolved_image_path"] = preview_df[image_col].apply(resolve_local_image_path)
-            else:
-                preview_df["resolved_image_path"] = None
-
-            image_examples = preview_df[preview_df["resolved_image_path"].notna()].head(6).copy()
+            image_examples = preview_df[preview_df["display_image"].notna()].head(6).copy()
 
             if not image_examples.empty:
                 image_grid_cols = st.columns(2)
+
                 for i, (_, example_row) in enumerate(image_examples.iterrows()):
                     with image_grid_cols[i % 2]:
-                        st.image(example_row["resolved_image_path"], use_container_width=True)
+                        img_path = example_row["display_image"]
+
+                        if isinstance(img_path, str) and not img_path.startswith("http"):
+                            resolved = Path(img_path)
+                            if not resolved.exists():
+                                resolved = Path.cwd() / img_path
+                            img_path = str(resolved)
+
+                        st.image(img_path, use_column_width=True)
 
                         if text_col and pd.notna(example_row.get(text_col)):
                             st.caption(str(example_row[text_col])[:160])
@@ -543,33 +595,35 @@ with tab_exemplars:
                             )
             else:
                 st.info(
-                    "Pinterest exemplars are available, but no valid local image files were found from the stored paths."
+                    "Pinterest exemplar rows were found, but no usable image files or image URLs were available."
                 )
 
-            display_cols: List[str] = [col for col in ["rank"] if col in cluster_pinterest_ex.columns]
+            table_cols: List[str] = [col for col in ["rank"] if col in cluster_pinterest_ex.columns]
             if text_col:
-                display_cols.append(text_col)
-            if image_col:
-                display_cols.append(image_col)
+                table_cols.append(text_col)
             if distance_col:
-                display_cols.append(distance_col)
+                table_cols.append(distance_col)
 
-            if len(display_cols) <= 1:
-                display_cols = [col for col in cluster_pinterest_ex.columns if col != "cluster_id"][:5]
+            raw_image_col = first_existing_column(cluster_pinterest_ex, image_candidates)
+            if raw_image_col:
+                table_cols.append(raw_image_col)
 
-            display_df = cluster_pinterest_ex[display_cols].copy()
+            if len(table_cols) <= 1:
+                table_cols = [col for col in cluster_pinterest_ex.columns if col != "cluster_id"][:5]
+
+            table_df = cluster_pinterest_ex[table_cols].copy()
 
             rename_map = {}
-            if text_col and text_col in display_df.columns:
+            if text_col and text_col in table_df.columns:
                 rename_map[text_col] = "caption"
-            if image_col and image_col in display_df.columns:
-                rename_map[image_col] = "image_path"
-            if distance_col and distance_col in display_df.columns:
+            if distance_col and distance_col in table_df.columns:
                 rename_map[distance_col] = "distance_to_centroid"
+            if raw_image_col and raw_image_col in table_df.columns:
+                rename_map[raw_image_col] = "image_source"
 
-            display_df = display_df.rename(columns=rename_map)
+            table_df = table_df.rename(columns=rename_map)
 
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.dataframe(table_df, use_container_width=True, hide_index=True)
 
             with st.expander("Show raw Pinterest exemplar columns"):
                 st.write(list(cluster_pinterest_ex.columns))
